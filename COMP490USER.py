@@ -210,8 +210,15 @@ def new_chat():
 
 
     # Step 4: duplicate AES key and encrypt with both public keys here
-    encrypted_for_me = encrypt_with_rsa(my_pub, aes_key)
-    encrypted_for_them = encrypt_with_rsa(their_pub, aes_key)
+    try:
+        encrypted_for_me = encrypt_with_rsa(my_pub, aes_key)
+        encrypted_for_them = encrypt_with_rsa(their_pub, aes_key)
+    except ValueError:
+        print(
+            "Could not start chat because one of the public keys is malformed. "
+            "Have both users sign up from the CLI client so valid PEM keys are uploaded."
+        )
+        return
 
     # Step 5: Send to server
     res = session.post(f"{SERVER_URL}/start_chat", json={

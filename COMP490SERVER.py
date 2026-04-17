@@ -2,6 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, session, g, render_template
+from cryptography.hazmat.primitives import serialization
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -127,6 +128,11 @@ def signup():
 
     if not username or not password or not public_key:
         return jsonify({"status": "fail", "message": "username, password, and public_key are required"}), 400
+
+    try:
+        serialization.load_pem_public_key(public_key.encode())
+    except ValueError:
+        return jsonify({"status": "fail", "message": "Invalid public key format"}), 400
 
     db = get_db()
     if get_user_by_username(username):
