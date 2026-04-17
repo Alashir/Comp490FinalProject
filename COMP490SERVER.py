@@ -4,7 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 app.secret_key = "secret_key_here"
 
-# In-memory "database for storing Username, Password, and pulic key"
+# In-memory "database for storing Username, Password, and public key"
 users = {}
 
 # In-memory "database for storing chats Structure idea:"
