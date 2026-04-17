@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-SERVER_URL = "https://corinna-hymnological-unlearnedly.ngrok-free.dev"
+SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
 #source venv/bin/activate
 #https://corinna-hymnological-unlearnedly.ngrok-free.dev
 #ngrok http 5000
