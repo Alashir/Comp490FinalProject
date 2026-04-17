@@ -1,11 +1,12 @@
 import os
 import base64
+import getpass
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-SERVER_URL = "https://corinna-hymnological-unlearnedly.ngrok-free.dev"
+SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
 #source venv/bin/activate
 #https://corinna-hymnological-unlearnedly.ngrok-free.dev
 #ngrok http 5000
@@ -13,6 +14,38 @@ SERVER_URL = "https://corinna-hymnological-unlearnedly.ngrok-free.dev"
 # Shared session so cookies persist between requests
 session = requests.Session()
 CURRENT_USER = None
+KEY_DIR = "client_keys"
+os.makedirs(KEY_DIR, exist_ok=True)
+
+
+def private_key_path_for_user(username):
+    return os.path.join(KEY_DIR, f"{username}_private.pem")
+
+
+def resolve_private_key_path(username):
+    preferred = private_key_path_for_user(username)
+    legacy = f"{username}_private.pem"
+
+    if os.path.exists(preferred):
+        return preferred
+    if os.path.exists(legacy):
+        return legacy
+    return preferred
+
+
+def prompt_new_private_key_passphrase():
+    while True:
+        passphrase = getpass.getpass("Create passphrase for your private key: ").strip()
+        confirm = getpass.getpass("Confirm passphrase: ").strip()
+
+        if not passphrase:
+            print("Passphrase cannot be blank.")
+            continue
+        if passphrase != confirm:
+            print("Passphrases did not match. Try again.")
+            continue
+        return passphrase.encode()
+
 
 #Login Page (signup)
 def signup():
@@ -36,7 +69,9 @@ def signup():
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.BestAvailableEncryption(
+            prompt_new_private_key_passphrase()
+        ),
     )
 
     public_pem = public_key.public_bytes(
@@ -48,9 +83,12 @@ def signup():
     
     
 
-    # Save private key locally in a .pem file (not secure yet)
-    with open(f"{username}_private.pem", "w") as f:
-        f.write(private_pem.decode())
+    # Save passphrase-encrypted private key locally
+    key_path = private_key_path_for_user(username)
+    with open(key_path, "wb") as f:
+        f.write(private_pem)
+
+    print(f"Private key saved to: {key_path}")
 
     # Send username, password, and public_key public key to server
     response = session.post(
@@ -82,6 +120,16 @@ def login():
 
     if data["status"] == "success":
         CURRENT_USER = username
+
+        key_path = resolve_private_key_path(username)
+        if not os.path.exists(key_path):
+            print(
+                "WARNING: Your local private key file is missing. "
+                "You can log in, but encrypted chats cannot be opened without it."
+            )
+            print(f"Expected key path: {private_key_path_for_user(username)}")
+            print(f"Legacy key path also checked: {username}_private.pem")
+
         # send to home page if login successful
         home_page()
         
@@ -230,7 +278,22 @@ def chat(other):
 
     encrypted_aes = data["aes_key"]
 
-    aes_key = decrypt_with_rsa(f"{CURRENT_USER}_private.pem", encrypted_aes)
+    key_path = resolve_private_key_path(CURRENT_USER)
+
+    if not os.path.exists(key_path):
+        print(
+            "Error: private key file not found for this account. "
+            "If this account was created on another machine, copy that key file first."
+        )
+        print(f"Expected key path: {private_key_path_for_user(CURRENT_USER)}")
+        print(f"Legacy key path also checked: {CURRENT_USER}_private.pem")
+        return
+
+    try:
+        aes_key = decrypt_with_rsa(key_path, encrypted_aes)
+    except ValueError:
+        print("Error: could not decrypt chat key with your private key. You may be using the wrong key file.")
+        return
 
     while True:
         # Step 2: Get messages
@@ -311,11 +374,21 @@ def decrypt_message(aes_key, encrypted_data):
 def decrypt_with_rsa(private_key_path, encrypted_data):
     from cryptography.hazmat.primitives.asymmetric import padding
 
+    passphrase = getpass.getpass(
+        "Enter private key passphrase (leave blank only for legacy unencrypted keys): "
+    )
+    password_bytes = passphrase.encode() if passphrase else None
+
     with open(private_key_path, "rb") as f:
+        key_bytes = f.read()
+
+    try:
         private_key = serialization.load_pem_private_key(
-            f.read(),
-            password=None
+            key_bytes,
+            password=password_bytes
         )
+    except (TypeError, ValueError):
+        raise ValueError("Unable to unlock private key with provided passphrase.")
 
     decoded = base64.b64decode(encrypted_data)
 

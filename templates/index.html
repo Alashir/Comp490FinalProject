@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Secure Messages</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="app">
+    <h1>🔐 Secure Messages</h1>
+
+    <section class="card" id="auth-card">
+      <h2>Account</h2>
+      <div class="row">
+        <input id="username" placeholder="Username" />
+        <input id="password" type="password" placeholder="Password" />
+      </div>
+      <div class="row">
+        <button id="signup-btn">Sign Up</button>
+        <button id="login-btn">Login</button>
+        <button id="logout-btn">Logout</button>
+      </div>
+      <p id="auth-status" class="status"></p>
+    </section>
+
+    <section class="grid">
+      <section class="card">
+        <h2>Conversations</h2>
+        <div class="row">
+          <input id="new-chat-user" placeholder="Username to chat" />
+          <button id="start-chat-btn">Start Chat</button>
+        </div>
+        <ul id="conversation-list"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Messages</h2>
+        <p id="active-chat">No active chat selected.</p>
+        <div id="messages" class="messages"></div>
+        <div class="row">
+          <input id="message-input" placeholder="Type an encrypted message" />
+          <button id="send-btn">Send</button>
+          <button id="refresh-btn">Refresh</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
