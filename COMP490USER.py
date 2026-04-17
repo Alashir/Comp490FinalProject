@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-SERVER_URL = "https://corinna-hymnological-unlearnedly.ngrok-free.dev"
+SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:5000")
 #source venv/bin/activate
 #https://corinna-hymnological-unlearnedly.ngrok-free.dev
 #ngrok http 5000
@@ -13,6 +13,13 @@ SERVER_URL = "https://corinna-hymnological-unlearnedly.ngrok-free.dev"
 # Shared session so cookies persist between requests
 session = requests.Session()
 CURRENT_USER = None
+KEY_DIR = "client_keys"
+os.makedirs(KEY_DIR, exist_ok=True)
+
+
+def private_key_path_for_user(username):
+    return os.path.join(KEY_DIR, f"{username}_private.pem")
+
 
 #Login Page (signup)
 def signup():
@@ -49,8 +56,11 @@ def signup():
     
 
     # Save private key locally in a .pem file (not secure yet)
-    with open(f"{username}_private.pem", "w") as f:
+    key_path = private_key_path_for_user(username)
+    with open(key_path, "w") as f:
         f.write(private_pem.decode())
+
+    print(f"Private key saved to: {key_path}")
 
     # Send username, password, and public_key public key to server
     response = session.post(
@@ -82,6 +92,15 @@ def login():
 
     if data["status"] == "success":
         CURRENT_USER = username
+
+        key_path = private_key_path_for_user(username)
+        if not os.path.exists(key_path):
+            print(
+                "WARNING: Your local private key file is missing. "
+                "You can log in, but encrypted chats cannot be opened without it."
+            )
+            print(f"Expected key path: {key_path}")
+
         # send to home page if login successful
         home_page()
         
@@ -230,7 +249,21 @@ def chat(other):
 
     encrypted_aes = data["aes_key"]
 
-    aes_key = decrypt_with_rsa(f"{CURRENT_USER}_private.pem", encrypted_aes)
+    key_path = private_key_path_for_user(CURRENT_USER)
+
+    if not os.path.exists(key_path):
+        print(
+            "Error: private key file not found for this account. "
+            "If this account was created on another machine, copy that key file first."
+        )
+        print(f"Expected key path: {key_path}")
+        return
+
+    try:
+        aes_key = decrypt_with_rsa(key_path, encrypted_aes)
+    except ValueError:
+        print("Error: could not decrypt chat key with your private key. You may be using the wrong key file.")
+        return
 
     while True:
         # Step 2: Get messages
