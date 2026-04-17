@@ -1,5 +1,6 @@
 import os
 import base64
+import getpass
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -32,6 +33,20 @@ def resolve_private_key_path(username):
     return preferred
 
 
+def prompt_new_private_key_passphrase():
+    while True:
+        passphrase = getpass.getpass("Create passphrase for your private key: ").strip()
+        confirm = getpass.getpass("Confirm passphrase: ").strip()
+
+        if not passphrase:
+            print("Passphrase cannot be blank.")
+            continue
+        if passphrase != confirm:
+            print("Passphrases did not match. Try again.")
+            continue
+        return passphrase.encode()
+
+
 #Login Page (signup)
 def signup():
     username = input("Enter username: ")
@@ -54,7 +69,9 @@ def signup():
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.BestAvailableEncryption(
+            prompt_new_private_key_passphrase()
+        ),
     )
 
     public_pem = public_key.public_bytes(
@@ -66,10 +83,10 @@ def signup():
     
     
 
-    # Save private key locally in a .pem file (not secure yet)
+    # Save passphrase-encrypted private key locally
     key_path = private_key_path_for_user(username)
-    with open(key_path, "w") as f:
-        f.write(private_pem.decode())
+    with open(key_path, "wb") as f:
+        f.write(private_pem)
 
     print(f"Private key saved to: {key_path}")
 
@@ -357,11 +374,21 @@ def decrypt_message(aes_key, encrypted_data):
 def decrypt_with_rsa(private_key_path, encrypted_data):
     from cryptography.hazmat.primitives.asymmetric import padding
 
+    passphrase = getpass.getpass(
+        "Enter private key passphrase (leave blank only for legacy unencrypted keys): "
+    )
+    password_bytes = passphrase.encode() if passphrase else None
+
     with open(private_key_path, "rb") as f:
+        key_bytes = f.read()
+
+    try:
         private_key = serialization.load_pem_private_key(
-            f.read(),
-            password=None
+            key_bytes,
+            password=password_bytes
         )
+    except (TypeError, ValueError):
+        raise ValueError("Unable to unlock private key with provided passphrase.")
 
     decoded = base64.b64decode(encrypted_data)
 
