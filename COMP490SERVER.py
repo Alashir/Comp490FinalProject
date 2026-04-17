@@ -1,232 +1,357 @@
-from flask import Flask, request, jsonify, session
+import os
+import sqlite3
+from datetime import datetime, timezone
+from flask import Flask, request, jsonify, session, g, render_template
+from cryptography.hazmat.primitives import serialization
 from werkzeug.security import generate_password_hash, check_password_hash
 
-app = Flask(__name__)
-app.secret_key = "secret_key_here"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_PATH = os.path.join(BASE_DIR, "secure_messages.db")
 
-# In-memory "database for storing Username, Password, and public key"
-users = {}
-
-# In-memory "database for storing chats Structure idea:"
-#conversations = {
-#    "anoop": {
-#        "pranav": {
-#            "aes_key_for_anoop": "...",
-#            "aes_key_for_pranav": "...",
- #           "messages": [
- #                         "sender": "anoop",
- #                         "message": "ENCRYPTED_BASE64"  
- #                          ...
- #                          ...
- #                          ...
-#                        ]
- #       }
- #   }
-#}
-conversations = {}
+app = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = os.environ.get("APP_SECRET_KEY", "dev-secret-change-me")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
 
 
-# SIGNUP
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DATABASE_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_error):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = sqlite3.connect(DATABASE_PATH)
+    db.executescript(
+        """
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user1_id INTEGER NOT NULL,
+            user2_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(user1_id, user2_id),
+            FOREIGN KEY(user1_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(user2_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_keys (
+            conversation_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            encrypted_aes_key TEXT NOT NULL,
+            PRIMARY KEY(conversation_id, user_id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            ciphertext TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+    db.commit()
+    db.close()
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_user_by_username(username):
+    db = get_db()
+    return db.execute(
+        "SELECT id, username, password_hash, public_key FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
+
+
+def get_user_by_id(user_id):
+    db = get_db()
+    return db.execute(
+        "SELECT id, username, public_key FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+
+
+def get_or_fail_logged_in_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    return get_user_by_id(user_id)
+
+
+def conversation_for_users(user_a, user_b):
+    user1, user2 = sorted([user_a, user_b])
+    db = get_db()
+    return db.execute(
+        "SELECT id, user1_id, user2_id FROM conversations WHERE user1_id = ? AND user2_id = ?",
+        (user1, user2),
+    ).fetchone()
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
 @app.route('/signup', methods=['POST'])
 def signup():
-    data = request.json
-    username = data['username']
-    password = data['password']
-    public_key = data['public_key']
+    data = request.json or {}
+    username = (data.get('username') or "").strip()
+    password = data.get('password')
+    public_key = data.get('public_key')
 
-    if username in users:
-        return jsonify({"status": "fail", "message": "Username already taken"})
+    if not username or not password or not public_key:
+        return jsonify({"status": "fail", "message": "username, password, and public_key are required"}), 400
 
-    users[username] = {
-        "password": password,
-        "public_key": public_key
-    }
+    try:
+        serialization.load_pem_public_key(public_key.encode())
+    except ValueError:
+        return jsonify({"status": "fail", "message": "Invalid public key format"}), 400
 
+    db = get_db()
+    if get_user_by_username(username):
+        return jsonify({"status": "fail", "message": "Username already taken"}), 409
+
+    db.execute(
+        "INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
+        (username, generate_password_hash(password), public_key, utc_now()),
+    )
+    db.commit()
     return jsonify({"status": "success", "message": "Account created successfully"})
 
 
-# LOGIN
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.json
-    username = data['username']
-    password = data['password']
+    data = request.json or {}
+    username = (data.get('username') or "").strip()
+    password = data.get('password')
 
-    if username in users and users[username]["password"] == password:
-        session['username'] = username
+    user = get_user_by_username(username)
+    if user and check_password_hash(user["password_hash"], password):
+        session['user_id'] = user["id"]
+        session['username'] = user["username"]
         return jsonify({"status": "success", "message": f"Access granted. Welcome {username}"})
-    
-    return jsonify({"status": "fail", "message": "Access denied"})
+
+    return jsonify({"status": "fail", "message": "Access denied"}), 401
 
 
-
-#home page
-#gets the chat and sends them to the user
 @app.route('/conversations')
 def get_conversations():
-    if 'username' not in session:
-        return jsonify({"status": "fail", "message": "Not logged in"})
+    user = get_or_fail_logged_in_user()
+    if not user:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    username = session['username']
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT u.username
+        FROM conversations c
+        JOIN users u
+          ON u.id = CASE WHEN c.user1_id = ? THEN c.user2_id ELSE c.user1_id END
+        WHERE c.user1_id = ? OR c.user2_id = ?
+        ORDER BY u.username ASC
+        """,
+        (user["id"], user["id"], user["id"]),
+    ).fetchall()
 
-    user_convos = []
-    if username in conversations:
-        user_convos = list(conversations[username].keys())
-
-    return jsonify({
-        "status": "success",
-        "conversations": user_convos
-    })
+    return jsonify({"status": "success", "conversations": [row["username"] for row in rows]})
 
 
-#home page
-#Starts a new chat between 2 users
 @app.route('/start_chat', methods=['POST'])
 def start_chat():
-    if 'username' not in session:
-        return jsonify({"status": "fail", "message": "Not logged in"})
+    me = get_or_fail_logged_in_user()
+    if not me:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    data = request.json
-    user1 = session['username']
-    user2 = data['username']
+    data = request.json or {}
+    other_username = (data.get('username') or "").strip()
+    aes_key_user1 = data.get("aes_key_user1")
+    aes_key_user2 = data.get("aes_key_user2")
 
-    if user2 not in users:
-        return jsonify({"status": "fail", "message": "User does not exist"})
+    if not other_username or not aes_key_user1 or not aes_key_user2:
+        return jsonify({"status": "fail", "message": "username, aes keys are required"}), 400
 
-    # Initialize both sides
-    conversations.setdefault(user1, {})
-    conversations.setdefault(user2, {})
+    other = get_user_by_username(other_username)
+    if not other:
+        return jsonify({"status": "fail", "message": "User does not exist"}), 404
 
-    if user2 in conversations[user1]:
-        return jsonify({"status": "fail", "message": "Chat already exists"})
+    if other["id"] == me["id"]:
+        return jsonify({"status": "fail", "message": "Cannot chat with yourself"}), 400
 
-    # Store encrypted AES keys
-    conversations[user1][user2] = {
-        "aes_key": data["aes_key_user1"],
-        "messages": []
-    }
+    db = get_db()
+    existing = conversation_for_users(me["id"], other["id"])
+    if existing:
+        return jsonify({"status": "fail", "message": "Chat already exists"}), 409
 
-    conversations[user2][user1] = {
-        "aes_key": data["aes_key_user2"],
-        "messages": []
-    }
+    user1, user2 = sorted([me["id"], other["id"]])
+    cur = db.execute(
+        "INSERT INTO conversations (user1_id, user2_id, created_at) VALUES (?, ?, ?)",
+        (user1, user2, utc_now()),
+    )
+    conversation_id = cur.lastrowid
 
+    key_for_me = aes_key_user1
+    key_for_other = aes_key_user2
+
+    db.execute(
+        "INSERT INTO conversation_keys (conversation_id, user_id, encrypted_aes_key) VALUES (?, ?, ?)",
+        (conversation_id, me["id"], key_for_me),
+    )
+    db.execute(
+        "INSERT INTO conversation_keys (conversation_id, user_id, encrypted_aes_key) VALUES (?, ?, ?)",
+        (conversation_id, other["id"], key_for_other),
+    )
+
+    db.commit()
     return jsonify({"status": "success", "message": "Chat created"})
 
 
-
-#home page
-#For creating a new chat sends the public keys of both users
 @app.route('/get_public_keys', methods=['POST'])
 def get_keys():
-    if 'username' not in session:
-        return jsonify({"status": "fail"})
+    me = get_or_fail_logged_in_user()
+    if not me:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    data = request.json
-    other = data['username']
-    me = session['username']
-    
+    data = request.json or {}
+    other_username = (data.get('username') or "").strip()
+    other = get_user_by_username(other_username)
 
-    if other not in users:
-        return jsonify({"status": "fail", "message": "User does not exist"})
+    if not other:
+        return jsonify({"status": "fail", "message": "User does not exist"}), 404
 
-    return jsonify({
-        "status": "success",
-        "my_public_key": users[me]["public_key"],
-        "their_public_key": users[other]["public_key"]
-    })
-
-
-
-
+    return jsonify(
+        {
+            "status": "success",
+            "my_public_key": me["public_key"],
+            "their_public_key": other["public_key"],
+        }
+    )
 
 
-
-
-
-
-#chat page
-#gets messages and sends them to the user (still encrypted)
 @app.route('/get_messages', methods=['POST'])
 def get_messages():
-    if 'username' not in session:
-        return jsonify({"status": "fail", "message": "Not logged in"})
+    me = get_or_fail_logged_in_user()
+    if not me:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    data = request.json
-    user1 = session['username']
-    user2 = data['username']
+    data = request.json or {}
+    other_username = (data.get('username') or "").strip()
+    other = get_user_by_username(other_username)
 
-    if user1 not in conversations or user2 not in conversations[user1]:
-        return jsonify({"status": "fail", "message": "No conversation"})
+    if not other:
+        return jsonify({"status": "fail", "message": "User does not exist"}), 404
 
-    return jsonify({
-        "status": "success",
-        "messages": conversations[user1][user2]["messages"]
-    })
+    conversation = conversation_for_users(me["id"], other["id"])
+    if not conversation:
+        return jsonify({"status": "fail", "message": "No conversation"}), 404
+
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT m.ciphertext AS message, u.username AS sender
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.conversation_id = ?
+        ORDER BY m.id ASC
+        """,
+        (conversation["id"],),
+    ).fetchall()
+
+    return jsonify({"status": "success", "messages": [dict(row) for row in rows]})
 
 
-
-#chat page
-#gets the aes key that encrypted the messages and that is encrypted with that users public key
 @app.route('/get_aes_key', methods=['POST'])
 def get_aes_key():
-    if 'username' not in session:
-        return jsonify({"status": "fail"})
+    me = get_or_fail_logged_in_user()
+    if not me:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    data = request.json
-    user1 = session['username']
-    user2 = data['username']
+    data = request.json or {}
+    other_username = (data.get('username') or "").strip()
+    other = get_user_by_username(other_username)
 
-    if user2 not in conversations[user1]:
-        return jsonify({"status": "fail"})
+    if not other:
+        return jsonify({"status": "fail", "message": "User does not exist"}), 404
 
-    return jsonify({
-        "status": "success",
-        "aes_key": conversations[user1][user2]["aes_key"]
-    })
+    conversation = conversation_for_users(me["id"], other["id"])
+    if not conversation:
+        return jsonify({"status": "fail", "message": "No conversation"}), 404
 
-#chat page
-#Puts the message receved from user into the conversations variable correctly
+    db = get_db()
+    row = db.execute(
+        "SELECT encrypted_aes_key FROM conversation_keys WHERE conversation_id = ? AND user_id = ?",
+        (conversation["id"], me["id"]),
+    ).fetchone()
+    if not row:
+        return jsonify({"status": "fail", "message": "No key found"}), 404
+
+    return jsonify({"status": "success", "aes_key": row["encrypted_aes_key"]})
+
+
 @app.route('/send_message', methods=['POST'])
 def send_message():
-    if 'username' not in session:
-        return jsonify({"status": "fail"})
+    me = get_or_fail_logged_in_user()
+    if not me:
+        return jsonify({"status": "fail", "message": "Not logged in"}), 401
 
-    data = request.json
-    sender = session['username']
-    receiver = data['username']
-    encrypted_msg = data['message']
+    data = request.json or {}
+    other_username = (data.get('username') or "").strip()
+    encrypted_msg = data.get('message')
 
-    msg_obj = {
-        "sender": sender,
-        "message": encrypted_msg
-    }
+    if not other_username or not encrypted_msg:
+        return jsonify({"status": "fail", "message": "username and message are required"}), 400
 
-    conversations[sender][receiver]["messages"].append(msg_obj)
-    conversations[receiver][sender]["messages"].append(msg_obj)
+    other = get_user_by_username(other_username)
+    if not other:
+        return jsonify({"status": "fail", "message": "User does not exist"}), 404
+
+    conversation = conversation_for_users(me["id"], other["id"])
+    if not conversation:
+        return jsonify({"status": "fail", "message": "No conversation"}), 404
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO messages (conversation_id, sender_id, ciphertext, created_at) VALUES (?, ?, ?, ?)",
+        (conversation["id"], me["id"], encrypted_msg, utc_now()),
+    )
+    db.commit()
 
     return jsonify({"status": "success"})
 
 
-
-
-
-
-
-
-
-
-
-# LOGOUT
 @app.route('/logout')
 def logout():
+    session.pop('user_id', None)
     session.pop('username', None)
     return jsonify({"message": "Logged out"})
-#source venv/bin/activate
-#https://corinna-hymnological-unlearnedly.ngrok-free.dev
-#ngrok http 5000
-#source venv/bin/activate
 
 
 if __name__ == '__main__':
+    init_db()
     app.run(host='0.0.0.0', port=5000)
